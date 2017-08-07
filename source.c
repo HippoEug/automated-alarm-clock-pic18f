@@ -2,7 +2,8 @@
 #include "delays.h"
 #include "lcd.h"
 #include "keypad.h"
-unsigned char hour, minute, second, hourA, minuteA;
+
+unsigned char hour, minute, second, hourA, minuteA, minuteG;
 unsigned char hour10, hour1, minute10, minute1, second10, second1;
 
 char int_2_char (unsigned char int1)
@@ -67,11 +68,11 @@ void interrupt ISR_Timer0_Int()			// Timer0 Interrupt Service Routine (ISR)
 			}
 		}
 
-		
         INTCONbits.TMR0IF = 0; // Reset TMR0IF to "0" since the end of
 								// the interrupt function has been reached
     }
 }
+
 void initial_display_time()
 {
     lcd_write_cmd(0x80);
@@ -96,6 +97,7 @@ void initial_display_alarm()
 		lcd_write_data(outchar);
 	}
 }
+
 void display_time()
 {
     hour10 = hour / 10;
@@ -124,6 +126,7 @@ void displayAlarmOn()
 		lcd_write_data('O');
 		lcd_write_data('n');
         lcd_write_data(' ');
+        lcd_write_data(' ');
 }
 
 void displayAlarmOff()
@@ -132,6 +135,16 @@ void displayAlarmOff()
 		lcd_write_data('O');
 		lcd_write_data('f');
         lcd_write_data('f');
+        lcd_write_data(' ');
+}
+
+void displayAlarmGrace()
+{
+	lcd_write_cmd(0xC6);
+		lcd_write_data('S');
+		lcd_write_data('T');
+        lcd_write_data('O');
+        lcd_write_data('P');
 }
 
 void SetupTime()
@@ -220,13 +233,44 @@ void SetupAlarmTime()
 	lcd_write_cmd(0x01);
 }
 
+void SetupGraceTime()
+{
+	unsigned char msgindex, outchar, ctemp;	
+	unsigned char minute10, minute1;
+	char Message1[ ] = "GraceTime(01-30)";
+	char Message2[ ] = "                ";
+	lcd_write_cmd(0x80);
+
+	for (msgindex = 0; msgindex < 16; msgindex++)
+	{
+		outchar = Message1[msgindex];
+		lcd_write_data(outchar);
+	}
+
+	lcd_write_cmd(0xC0); // Move cursor to line 2 position 1
+
+	ctemp=getkey(); // waits and get an ascii key number when pressed
+	lcd_write_data(ctemp); //display on LCD
+	minute10 = char_2_int (ctemp);
+
+	ctemp=getkey();
+	lcd_write_data(ctemp);
+	minute1 = char_2_int (ctemp);
+
+	minuteG = minute10 * 10 + minute1;
+    
+    delay_ms(500);
+	lcd_write_cmd(0x01);
+}
+
 int light_sensor()     //RA0
 {
-#define THRESHOLD 0x01
-    
+#define THRESHOLD 76    //1.49v
+    unsigned char linhao;
     ADCON0bits.GO=1;
     while(ADCON0bits.GO==1);
-    if (PORTAbits.RA0 >= THRESHOLD)
+    linhao=ADRESH;
+    if (linhao >= THRESHOLD)
         return 1;
     else
         return 0;
@@ -243,30 +287,37 @@ int motion_sensor()    //RC0
 void onetone(void) //Function to generate one tone
 {
     unsigned int k;
-    for (k = 0; k < 250; k++) //Determines duration of tone
+    for (k = 0; k < 500; k++) //Determines duration of tone
     {
-        delay_us(250);  // usable values from 100  to 5000
+        delay_us(500);  // usable values from 100  to 5000
         PORTCbits.RC2 = !PORTCbits.RC2; //Invert logic level at RC0
     }
 }
 
 void buzzer()           //RC2
 {
-    int i;
-    for (i=0;i<60;i++)
+    int i,j;
+    j=0;
+    for (i=0;i<375;i++) //roughly 3 min
     {
-        delay_ms(1000);
-        onetone();
-        if(light_sensor()==1  && motion_sensor()==1)
+        if(light_sensor()==1 && motion_sensor()==1)
         {
             PORTCbits.RC2=0;
             break;
         }
+        onetone();
+        delay_ms(750-(j*25));
+        if(j<=20)
+        j++;
     }
 }
 
 void main(void) 
 {
+    unsigned int grace_h,grace_m,grace_status,grace_stop;
+    grace_status=0;
+    grace_stop=0;
+                        //grace status: 0=grace off     1=grace on      2=grace read
     ADCON0=0b00000001;  
     ADCON1=0b00001110;
     ADCON2=0b00010110;
@@ -276,8 +327,9 @@ void main(void)
     TRISCbits.TRISC2=0;
     
     lcd_init();         //initialize keypad & lcd
-    SetupTime();        //display <time:>
-	SetupAlarmTime();   //display <Alarm>
+    SetupTime();
+	SetupAlarmTime();
+    SetupGraceTime();
     
     RCONbits.IPEN=1;    //interrupt clock timer
     INTCONbits.GIEH=1;
@@ -289,8 +341,34 @@ void main(void)
 	INTCONbits.TMR0IE = 1;
     INTCONbits.TMR0IF = 0;
     
-    unsigned char displayUpdated;
+    unsigned char displayUpdated,hour_negative;
     displayUpdated=1;
+    
+    /*if (minuteA <5)
+    {
+        grace_m = 55+minuteA;
+        grace_h = hourA-1;
+        hour_negative = 1;
+    }
+    else
+    {
+        grace_m = minuteA-5;
+    	grace_h = hourA;
+        hour_negative = 0;
+    }*/
+    if (minuteA < minuteG)
+    {
+        grace_m = (60-minuteG)+minuteA;
+        grace_h = hourA-1;
+        hour_negative = 1;
+    }
+    else
+    {
+        grace_m = minuteA-minuteG;
+    	grace_h = hourA;
+        hour_negative = 0;
+    }
+    
     initial_display_time();
     initial_display_alarm();
     displayAlarmOff();
@@ -298,24 +376,64 @@ void main(void)
     for(;;)
     {
         display_time();
+     
+        if (hour_negative==0 && grace_stop!=1)
+        {
+            if(hour==grace_h && hour==hourA && minute>=grace_m && minute<minuteA)
+            {
+                     if(light_sensor()==1 && motion_sensor()==1)
+                     {
+                     grace_status=1;
+                     grace_stop=1;
+                     displayAlarmGrace();
+                     }
+            }
+        }   
+        else
+        {
+            if(hour_negative==1 && grace_stop!=1)
+            {
+            if(hour>=grace_h && hour<=hourA && (minute>=grace_m || minute<minuteA))
+                {
+                    if(light_sensor()==1 && motion_sensor()==1)
+                    {
+                    grace_status=1;
+                    grace_stop=1;
+                    displayAlarmGrace();
+                    }
+                }
+            }
+        }
         
         if(hour==hourA && minute==minuteA)
 		{
 			if(displayUpdated == 2)
 			{
-				displayAlarmOn();
-                buzzer();
-                displayAlarmOff();
-				displayUpdated = 1;
+                if(grace_status==1)
+                {
+                    displayAlarmOff();
+                    displayUpdated = 1;
+                    grace_status=2;
+                }
+                
+                if(grace_status==0)
+                {
+                    displayAlarmOn();
+                    buzzer();
+                    displayAlarmOff();
+                    displayUpdated = 1;
+                    grace_status=2;
+                }
 			}
 		}
 		else
 		{
 			if(displayUpdated == 1)
 			{
-				displayUpdated = 2;
+                displayUpdated = 2;
+                grace_status=0;
+                grace_stop=0;
 			}
 		}
-               
     }
 }
